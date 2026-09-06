@@ -53,7 +53,7 @@ function singleFlight(key, run) {
 
 async function refresh(ctx, cache, key, previous, staleTtl, produce) {
 	try {
-		const value = await produce();
+		const value = await produce(previous?.value);
 
 		writeEntry(ctx, cache, key, { value, producedAt: Date.now() }, staleTtl);
 

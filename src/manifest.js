@@ -81,11 +81,36 @@ function buildDev(run, artifacts, origin) {
 				.filter(Boolean)
 				.sort()[0] ?? null,
 		runUrl: run.html_url ?? null,
-		assets: collectAssets(
-			artifacts,
-			(artifact) => `${origin}/dev/${encodeURIComponent(artifact.name)}`,
-		),
+		// The hash pins the download to this exact build, so a manifest that was cached just before
+		// a newer build landed still fetches the file it describes
+		assets: collectAssets(artifacts, (artifact) => {
+			const url = `${origin}/dev/${encodeURIComponent(artifact.name)}`;
+			const digest = parseDigest(artifact.digest);
+
+			return digest ? `${url}?sha256=${digest}` : url;
+		}),
 	};
+}
+
+// How many recent builds of each file stay downloadable after a newer one has replaced them.
+const KEPT_BUILDS = 5;
+
+// Artifact ids are kept out of the public manifest so that they cannot be enumerated; the redirect
+// route resolves a file name and hash through this map instead. Ids from the previous manifest are
+// carried along so that clients holding a slightly older manifest can still fetch their build.
+function collectArtifactIds(artifacts, previous) {
+	const ids = {};
+
+	for (const artifact of artifacts) {
+		const current = { id: artifact.id, sha256: parseDigest(artifact.digest) };
+		const older = (previous?.[artifact.name] ?? []).filter(
+			(entry) => entry.id !== current.id,
+		);
+
+		ids[artifact.name] = [current, ...older].slice(0, KEPT_BUILDS);
+	}
+
+	return ids;
 }
 
 // The dev channel comes from endpoints unrelated to the release, so it degrades to nothing
@@ -106,7 +131,7 @@ async function loadDev(env) {
 	}
 }
 
-export async function buildManifest(env, origin) {
+export async function buildManifest(env, origin, previousArtifactIds) {
 	const [release, { run, artifacts }] = await Promise.all([
 		getLatestRelease(env),
 		loadDev(env),
@@ -117,10 +142,6 @@ export async function buildManifest(env, origin) {
 			stable: buildStable(release),
 			dev: buildDev(run, artifacts, origin),
 		},
-		// Artifact ids are kept out of the public manifest so that they cannot be enumerated;
-		// the redirect route resolves a file name through this map instead.
-		artifactIds: Object.fromEntries(
-			artifacts.map((artifact) => [artifact.name, artifact.id]),
-		),
+		artifactIds: collectArtifactIds(artifacts, previousArtifactIds),
 	};
 }

@@ -12,6 +12,7 @@ and the latest dev build into a single manifest, so the GUI makes one request.
 | --- | --- |
 | `GET /v1/latest.json` | Latest stable release and latest successful dev build, with per-platform assets |
 | `GET /dev/{fileName}` | Redirects to the signed download URL of that file from the latest dev build |
+| `GET /dev/{fileName}?sha256={hash}` | Same, but for the recent dev build with that hash, which is what the manifest links to |
 
 Only assets listed in `GUI_ASSETS` in `src/manifest.js` are included in the manifest. Adding a platform
 means adding its file name and runtime identifier there, and uploading it from CI under that name with

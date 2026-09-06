@@ -21,7 +21,7 @@ const REDIRECT_CACHE_CONTROL = `public, max-age=${ARTIFACT_URL_TTL}`;
 
 // Bump when the shape of the cached manifest entry changes, so entries written by the previous
 // deployment are not read by the new code.
-const MANIFEST_CACHE_KEY = 'manifest.v2';
+const MANIFEST_CACHE_KEY = 'manifest.v3';
 
 const HOME_URL = 'https://s2v.app/';
 
@@ -116,8 +116,12 @@ function getManifest(ctx, env, origin) {
 		origin,
 		MANIFEST_CACHE_KEY,
 		{ ttl: MANIFEST_TTL, staleTtl: MANIFEST_STALE_TTL },
-		async () => {
-			const { manifest, artifactIds } = await buildManifest(env, origin);
+		async (previous) => {
+			const { manifest, artifactIds } = await buildManifest(
+				env,
+				origin,
+				previous?.artifactIds,
+			);
 			const body = JSON.stringify(manifest);
 
 			return { body, etag: await computeEtag(body), artifactIds };
@@ -150,16 +154,28 @@ async function handleManifest(request, env, ctx, origin) {
 	});
 }
 
-// Only file names present in the current manifest can be redirected to. Anything else is rejected
-// before touching GitHub, so the token's rate limit cannot be burned from outside.
-async function handleArtifact(env, ctx, origin, fileName) {
+// Only file names and hashes present in the current or a recent manifest can be redirected to.
+// Anything else is rejected before touching GitHub, so the token's rate limit cannot be burned from outside.
+async function handleArtifact(env, ctx, origin, fileName, sha256) {
 	const { value } = await getManifest(ctx, env, origin);
 
 	if (!Object.hasOwn(value.artifactIds, fileName)) {
 		throw new UpstreamError('not_found', 'No such dev build artifact');
 	}
 
-	const artifactId = value.artifactIds[fileName];
+	const builds = value.artifactIds[fileName];
+	const build = sha256
+		? builds.find((entry) => entry.sha256 === sha256)
+		: builds[0];
+
+	if (!build) {
+		throw new UpstreamError(
+			'not_found',
+			'No dev build artifact with that hash is available anymore',
+		);
+	}
+
+	const artifactId = build.id;
 
 	const { value: location } = await cachedValue(
 		ctx,
@@ -215,12 +231,16 @@ async function handleRequest(request, env, ctx) {
 	}
 
 	const fileName = decodeSegment(artifactMatch[1]);
+	const sha256 = url.searchParams.get('sha256')?.toLowerCase() ?? null;
 
-	if (fileName === null) {
+	if (
+		fileName === null ||
+		(sha256 !== null && !/^[0-9a-f]{64}$/.test(sha256))
+	) {
 		return jsonError(400, 'Malformed path');
 	}
 
-	return handleArtifact(env, ctx, origin, fileName);
+	return handleArtifact(env, ctx, origin, fileName, sha256);
 }
 
 export default {
