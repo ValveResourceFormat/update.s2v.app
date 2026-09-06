@@ -1,0 +1,43 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "update-s2v-app",
+	"main": "src/index.js",
+	"compatibility_date": "2026-08-01",
+	"routes": [
+		{
+			"pattern": "update.s2v.app",
+			"custom_domain": true
+		}
+	],
+	"workers_dev": false,
+	"preview_urls": false,
+	// Responses with a Cache-Control max-age are served from the edge without running the worker.
+	// Hits are still billed as requests, but cost no CPU time and no GitHub calls.
+	"cache": {
+		"enabled": true
+	},
+	"observability": {
+		"enabled": true,
+		"logs": {
+			// Only explicit console.error lines are kept, so log volume cannot scale with traffic.
+			"invocation_logs": false
+		}
+	},
+	"ratelimits": [
+		{
+			"name": "RATE_LIMITER",
+			"namespace_id": "1001",
+			"simple": {
+				"limit": 30,
+				"period": 60
+			}
+		}
+	],
+	"vars": {
+		"PUBLIC_ORIGIN": "https://update.s2v.app",
+		"GITHUB_REPO": "ValveResourceFormat/ValveResourceFormat",
+		"GITHUB_WORKFLOW": "build.yml",
+		"GITHUB_BRANCH": "master"
+	}
+	// GITHUB_TOKEN is a secret: npx wrangler secret put GITHUB_TOKEN
+}
