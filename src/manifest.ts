@@ -191,11 +191,16 @@ async function loadDev(env: Env) {
 	}
 }
 
+export interface BuiltManifest {
+	manifest: Manifest;
+	artifactIds: ArtifactIds;
+}
+
 export async function buildManifest(
 	env: Env,
 	origin: string,
-	previousArtifactIds: ArtifactIds | undefined,
-): Promise<{ manifest: Manifest; artifactIds: ArtifactIds }> {
+	previous: BuiltManifest | undefined,
+): Promise<BuiltManifest> {
 	const [release, { run, artifacts }] = await Promise.all([
 		getLatestRelease(env),
 		loadDev(env),
@@ -206,6 +211,6 @@ export async function buildManifest(
 			stable: buildStable(release),
 			dev: buildDev(run, artifacts, origin),
 		},
-		artifactIds: collectArtifactIds(artifacts, previousArtifactIds),
+		artifactIds: collectArtifactIds(artifacts, previous?.artifactIds),
 	};
 }

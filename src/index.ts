@@ -1,24 +1,18 @@
-import { type CachedResult, cachedValue } from './cache.ts';
+import { createCache } from './cache.ts';
 import { UpstreamError } from './errors.ts';
 import { getArtifactDownloadUrl } from './github.ts';
-import { type ArtifactIds, buildManifest } from './manifest.ts';
+import { buildManifest } from './manifest.ts';
 
 // How long a manifest is served before GitHub is asked again, and how long an old one may be
 // served while GitHub is unavailable.
 const MANIFEST_TTL = 120;
 const MANIFEST_STALE_TTL = 86400;
 
-// GitHub documents the signed artifact URL as valid for one minute; a cached one must
-// still leave the client time to start the download.
-const ARTIFACT_URL_TTL = 20;
-
 // Edge cache lifetimes. s-maxage must not be used here, since it disables both stale behaviours.
-const MANIFEST_CACHE_CONTROL =
-	'public, max-age=120, stale-while-revalidate=30, stale-if-error=86400';
-const REDIRECT_CACHE_CONTROL = `public, max-age=${ARTIFACT_URL_TTL}`;
-
-// Bump when the shape of the cached manifest entry changes.
-const MANIFEST_CACHE_KEY = 'manifest.v4';
+const MANIFEST_CACHE_CONTROL = `public, max-age=${MANIFEST_TTL}, stale-while-revalidate=30, stale-if-error=${MANIFEST_STALE_TTL}`;
+// GitHub documents the signed URL as valid for one minute, and a replayed redirect must
+// still leave the client time to start the download.
+const REDIRECT_CACHE_CONTROL = 'public, max-age=20';
 
 const HOME_URL = 'https://s2v.app/';
 
@@ -26,12 +20,12 @@ const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
 };
 
-// Body and ETag are computed once per manifest, not per request.
-interface CachedManifest {
-	body: string;
-	etag: string;
-	artifactIds: ArtifactIds;
-}
+// Bump the key when the shape of the cached entry changes.
+const getManifest = createCache(
+	'manifest.v5',
+	{ ttl: MANIFEST_TTL, staleTtl: MANIFEST_STALE_TTL },
+	buildManifest,
+);
 
 function jsonError(
 	status: number,
@@ -71,108 +65,29 @@ function decodeSegment(segment: string): string | null {
 	}
 }
 
-// IPv6 addresses are limited per /64, since a single customer holds a whole one.
-function rateLimitKey(request: Request): string {
-	const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-
-	if (!ip.includes(':')) {
-		return ip;
-	}
-
-	// The first four groups are always before a ::, and the groups it elides are zeros.
-	const [head = ''] = ip.split('::');
-	const groups = head.split(':').filter(Boolean);
-
-	return [...groups, '0', '0', '0', '0']
-		.slice(0, 4)
-		.map((group) => group.padStart(4, '0'))
-		.join(':');
-}
-
-async function computeEtag(body: string): Promise<string> {
-	const digest = await crypto.subtle.digest(
-		'SHA-1',
-		new TextEncoder().encode(body),
-	);
-	const hex = Array.from(new Uint8Array(digest), (b) =>
-		b.toString(16).padStart(2, '0'),
-	).join('');
-
-	return `W/"${hex}"`;
-}
-
-// If-None-Match is a list and uses weak comparison (RFC 9110 13.1.2).
-function matchesEtag(header: string | null, etag: string): boolean {
-	if (!header) {
-		return false;
-	}
-
-	if (header.trim() === '*') {
-		return true;
-	}
-
-	const target = etag.replace(/^W\//, '');
-
-	return header
-		.split(',')
-		.some((candidate) => candidate.trim().replace(/^W\//, '') === target);
-}
-
-function getManifest(
-	ctx: ExecutionContext,
-	env: Env,
-	origin: string,
-): Promise<CachedResult<CachedManifest>> {
-	return cachedValue<CachedManifest>(
-		ctx,
-		origin,
-		MANIFEST_CACHE_KEY,
-		{ ttl: MANIFEST_TTL, staleTtl: MANIFEST_STALE_TTL },
-		async (previous) => {
-			const { manifest, artifactIds } = await buildManifest(
-				env,
-				origin,
-				previous?.artifactIds,
-			);
-			const body = JSON.stringify(manifest);
-
-			return { body, etag: await computeEtag(body), artifactIds };
-		},
-	);
-}
-
 async function handleManifest(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext,
 	origin: string,
 ): Promise<Response> {
-	const { value, stale } = await getManifest(ctx, env, origin);
+	const { manifest } = await getManifest(ctx, env, origin);
 
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json; charset=utf-8',
-		'Cache-Control': MANIFEST_CACHE_CONTROL,
-		'X-Content-Type-Options': 'nosniff',
-		'Access-Control-Expose-Headers': 'ETag',
-		...CORS_HEADERS,
-		ETag: value.etag,
-	};
-
-	if (stale) {
-		headers['X-Manifest-Stale'] = '1';
-	}
-
-	if (matchesEtag(request.headers.get('If-None-Match'), value.etag)) {
-		return new Response(null, { status: 304, headers });
-	}
-
-	return new Response(request.method === 'HEAD' ? null : value.body, {
-		headers,
-	});
+	return new Response(
+		request.method === 'HEAD' ? null : JSON.stringify(manifest),
+		{
+			headers: {
+				'Content-Type': 'application/json; charset=utf-8',
+				'Cache-Control': MANIFEST_CACHE_CONTROL,
+				'X-Content-Type-Options': 'nosniff',
+				...CORS_HEADERS,
+			},
+		},
+	);
 }
 
-// Only files from a current or recent manifest are looked up, so the token's rate limit
-// cannot be burned from outside.
+// Only files from a current or recent manifest are resolved, so artifact ids cannot be
+// enumerated through the token.
 async function handleArtifact(
 	env: Env,
 	ctx: ExecutionContext,
@@ -180,11 +95,11 @@ async function handleArtifact(
 	fileName: string,
 	sha256: string | null,
 ): Promise<Response> {
-	const { value } = await getManifest(ctx, env, origin);
+	const { artifactIds } = await getManifest(ctx, env, origin);
 
 	// hasOwn keeps a name like "constructor" from hitting the prototype.
-	const builds = Object.hasOwn(value.artifactIds, fileName)
-		? value.artifactIds[fileName]
+	const builds = Object.hasOwn(artifactIds, fileName)
+		? artifactIds[fileName]
 		: undefined;
 
 	if (!builds) {
@@ -202,20 +117,10 @@ async function handleArtifact(
 		);
 	}
 
-	const artifactId = build.id;
-
-	const { value: location } = await cachedValue(
-		ctx,
-		origin,
-		`artifact/${artifactId}`,
-		{ ttl: ARTIFACT_URL_TTL, staleTtl: ARTIFACT_URL_TTL },
-		() => getArtifactDownloadUrl(env, artifactId),
-	);
-
 	return new Response(null, {
 		status: 302,
 		headers: {
-			Location: location,
+			Location: await getArtifactDownloadUrl(env, build.id),
 			'Cache-Control': REDIRECT_CACHE_CONTROL,
 			...CORS_HEADERS,
 		},
@@ -250,15 +155,6 @@ async function handleRequest(
 		if (key !== allowedParam) {
 			return jsonError(400, 'Unexpected query parameter');
 		}
-	}
-
-	// Fails open: the routes are cheap, and a missing binding must not break every request.
-	const { success } = (await env.RATE_LIMITER?.limit({
-		key: rateLimitKey(request),
-	})) ?? { success: true };
-
-	if (!success) {
-		return jsonError(429, 'Too many requests', { 'Retry-After': '60' });
 	}
 
 	// Never taken from the request: it prefixes cache keys and is embedded in the shared manifest.

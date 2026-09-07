@@ -95,9 +95,8 @@ export function getLatestRelease(env: Env): Promise<Release> {
 // Events that can only be triggered from the repository itself. The branch filter alone is not
 // enough, since a pull request from a fork can also have a head branch called master. The API
 // takes one event per query, so each is queried and the newest run wins. Scheduled runs are
-// included because they keep artifacts from expiring on a quiet branch. Keep the list short:
-// these run concurrently with the release request, and a Worker allows six requests in flight.
-const TRUSTED_EVENTS = ['push', 'schedule', 'workflow_dispatch'];
+// included because they keep artifacts from expiring on a quiet branch.
+const TRUSTED_EVENTS = ['push', 'schedule'];
 
 async function getLatestRunForEvent(
 	env: Env,
