@@ -14,7 +14,7 @@ and the latest dev build into a single manifest, so the GUI makes one request.
 | `GET /dev/{fileName}` | Redirects to the signed download URL of that file from the latest dev build |
 | `GET /dev/{fileName}?sha256={hash}` | Same, but for the recent dev build with that hash, which is what the manifest links to |
 
-Only assets listed in `GUI_ASSETS` in `src/manifest.js` are included in the manifest. Adding a platform
+Only assets listed in `GUI_ASSETS` in `src/manifest.ts` are included in the manifest. Adding a platform
 means adding its file name and runtime identifier there, and uploading it from CI under that name with
 `archive: false`.
 
@@ -37,3 +37,6 @@ npm run dev
 ```
 
 Serves on `http://localhost:8787`. Put `GITHUB_TOKEN=...` in a `.dev.vars` file to test redirects locally.
+
+`npm test` type-checks and lints. `worker-configuration.d.ts` holds the Workers runtime types and the `Env`
+interface, generated from `wrangler.jsonc`. Run `npm run types` after changing the config or upgrading wrangler.

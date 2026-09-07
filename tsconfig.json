@@ -1,0 +1,13 @@
+{
+	"compilerOptions": {
+		// The default lib includes the DOM, which clashes with the Workers runtime types.
+		"lib": ["ESNext"],
+		"types": ["./worker-configuration.d.ts"],
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["src"]
+}

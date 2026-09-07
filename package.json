@@ -4,11 +4,13 @@
 	"scripts": {
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
-		"test": "biome check",
+		"types": "wrangler types",
+		"test": "wrangler types --check && tsc && biome check",
 		"fix": "biome check --write"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4",
+		"typescript": "^7.0.2",
 		"wrangler": "^4.129"
 	}
 }
