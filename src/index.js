@@ -4,19 +4,20 @@ import { getArtifactDownloadUrl } from './github.js';
 import { buildManifest } from './manifest.js';
 
 // How long a manifest is served before GitHub is asked again, and how long an old copy may be
-// served while that refresh runs or GitHub is unavailable.
-const MANIFEST_TTL = 600;
+// served when GitHub is unavailable. The edge cache absorbs nearly all requests, so this only
+// bounds how often a location that does get through rebuilds the manifest.
+const MANIFEST_TTL = 120;
 const MANIFEST_STALE_TTL = 86400;
 
 // GitHub documents the signed artifact URL as valid for one minute, so a cached one must
 // still leave the client enough time to start the download.
 const ARTIFACT_URL_TTL = 20;
 
-// Edge cache lifetimes. The manifest stays fresh for five minutes, is served stale while a refresh
+// Edge cache lifetimes. The manifest stays fresh for two minutes, is served stale while a refresh
 // runs, and stays available for a day if the worker fails. s-maxage must not be used here, since
 // it disables both stale behaviours. The redirect is shared for as long as its signed URL is cached.
 const MANIFEST_CACHE_CONTROL =
-	'public, max-age=300, stale-while-revalidate=60, stale-if-error=86400';
+	'public, max-age=120, stale-while-revalidate=30, stale-if-error=86400';
 const REDIRECT_CACHE_CONTROL = `public, max-age=${ARTIFACT_URL_TTL}`;
 
 // Bump when the shape of the cached manifest entry changes, so entries written by the previous
@@ -210,6 +211,16 @@ async function handleRequest(request, env, ctx) {
 
 	if (url.pathname !== '/v1/latest.json' && !artifactMatch) {
 		return jsonError(404, 'Not found');
+	}
+
+	// The edge cache is keyed on the full URL, so an unexpected query string would be a way
+	// to reach the worker with every request. Only the download route takes a parameter.
+	const allowedParam = artifactMatch ? 'sha256' : null;
+
+	for (const key of url.searchParams.keys()) {
+		if (key !== allowedParam) {
+			return jsonError(400, 'Unexpected query parameter');
+		}
 	}
 
 	// The limiter fails open: the routes behind it are cached and cheap, and a missing

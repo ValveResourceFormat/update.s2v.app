@@ -1,7 +1,8 @@
 // Wrapper over the per-location Cache API. One entry per key holds the last good value and when it
-// was produced, plus the last failure and when it happened. A value older than its ttl is served
-// while a refresh runs in the background, and a recent failure is not retried, so a GitHub outage
-// or rate limit degrades to a slightly old value rather than an error or a storm of requests.
+// was produced, plus the last failure and when it happened. A value older than its ttl is refreshed
+// before being answered, and when that refresh fails the old value is served and the failure is not
+// retried for a while, so a GitHub outage or rate limit degrades to a slightly old value rather than
+// an error or a storm of requests.
 
 import { UpstreamError } from './errors.js';
 
@@ -57,7 +58,7 @@ async function refresh(ctx, cache, key, previous, staleTtl, produce) {
 
 		writeEntry(ctx, cache, key, { value, producedAt: Date.now() }, staleTtl);
 
-		return value;
+		return { value, stale: false };
 	} catch (error) {
 		const failure = {
 			kind: error?.kind ?? 'upstream',
@@ -79,7 +80,7 @@ async function refresh(ctx, cache, key, previous, staleTtl, produce) {
 
 		console.error(`Serving stale ${key.url}: ${failure.message}`);
 
-		return previous.value;
+		return { value: previous.value, stale: true };
 	}
 }
 
@@ -107,15 +108,10 @@ export async function cachedValue(
 		throw new UpstreamError(entry.failure.kind, entry.failure.message);
 	}
 
-	const pending = singleFlight(key.url, () =>
+	// An expired value is refreshed before answering rather than served one more time. The edge cache
+	// in front stores whatever is answered here for its own lifetime, so handing out the old value
+	// would push a new build back by another full cycle at every cache layer.
+	return singleFlight(key.url, () =>
 		refresh(ctx, cache, key, entry, staleTtl, produce),
 	);
-
-	if (hasValue) {
-		ctx.waitUntil(pending.catch(() => {}));
-
-		return { value: entry.value, stale: false };
-	}
-
-	return { value: await pending, stale: false };
 }
