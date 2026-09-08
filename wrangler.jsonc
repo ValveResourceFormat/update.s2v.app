@@ -25,7 +25,7 @@
 	},
 	"vars": {
 		"PUBLIC_ORIGIN": "https://update.s2v.app",
-		"GITHUB_REPO": "ValveResourceFormat/ValveResourceFormat",
+		"GITHUB_REPO_ID": "42366054", // ValveResourceFormat/ValveResourceFormat
 		"GITHUB_WORKFLOW": "build.yml",
 		"GITHUB_BRANCH": "master"
 	},

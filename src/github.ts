@@ -37,7 +37,7 @@ export interface WorkflowRun {
 	updated_at: string;
 	html_url: string;
 	conclusion: string | null;
-	head_repository: { full_name: string };
+	head_repository: { id: number };
 }
 
 export interface Artifact {
@@ -89,7 +89,10 @@ async function apiJson<T>(env: Env, path: string): Promise<T> {
 }
 
 export function getLatestRelease(env: Env): Promise<Release> {
-	return apiJson<Release>(env, `/repos/${env.GITHUB_REPO}/releases/latest`);
+	return apiJson<Release>(
+		env,
+		`/repositories/${env.GITHUB_REPO_ID}/releases/latest`,
+	);
 }
 
 // Events that can only be triggered from the repository itself. The branch filter alone is not
@@ -111,7 +114,7 @@ async function getLatestRunForEvent(
 
 	const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
 		env,
-		`/repos/${env.GITHUB_REPO}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
+		`/repositories/${env.GITHUB_REPO_ID}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
 	);
 
 	const run = data.workflow_runs[0];
@@ -119,8 +122,7 @@ async function getLatestRunForEvent(
 	if (
 		run?.conclusion !== 'success' ||
 		run.head_branch !== env.GITHUB_BRANCH ||
-		run.head_repository.full_name.toLowerCase() !==
-			env.GITHUB_REPO.toLowerCase()
+		run.head_repository.id !== Number(env.GITHUB_REPO_ID)
 	) {
 		return null;
 	}
@@ -149,7 +151,7 @@ export async function getRunArtifacts(
 	// A run uploads far fewer than a hundred artifacts, so one page is enough.
 	const data = await apiJson<{ artifacts: Artifact[] }>(
 		env,
-		`/repos/${env.GITHUB_REPO}/actions/runs/${runId}/artifacts?per_page=100`,
+		`/repositories/${env.GITHUB_REPO_ID}/actions/runs/${runId}/artifacts?per_page=100`,
 	);
 
 	return data.artifacts;
@@ -166,7 +168,7 @@ export async function getArtifactDownloadUrl(
 	}
 
 	const response = await fetch(
-		`${API_BASE}/repos/${env.GITHUB_REPO}/actions/artifacts/${artifactId}/zip`,
+		`${API_BASE}/repositories/${env.GITHUB_REPO_ID}/actions/artifacts/${artifactId}/zip`,
 		{
 			headers: headers(env, true),
 			redirect: 'manual',
