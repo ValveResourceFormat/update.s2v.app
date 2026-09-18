@@ -1,12 +1,6 @@
-import { createCache } from './cache.ts';
+import { getManifest, MANIFEST_STALE_TTL, MANIFEST_TTL } from './cache.ts';
 import { UpstreamError } from './errors.ts';
 import { getArtifactDownloadUrl } from './github.ts';
-import { buildManifest } from './manifest.ts';
-
-// How long a manifest is served before GitHub is asked again, and how long an old one may be
-// served while GitHub is unavailable.
-const MANIFEST_TTL = 120;
-const MANIFEST_STALE_TTL = 86400;
 
 // Edge cache lifetimes. s-maxage must not be used here, since it disables both stale behaviours.
 const MANIFEST_CACHE_CONTROL = `public, max-age=${MANIFEST_TTL}, stale-while-revalidate=30, stale-if-error=${MANIFEST_STALE_TTL}`;
@@ -19,13 +13,6 @@ const HOME_URL = 'https://s2v.app/';
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
 };
-
-// Bump the key when the shape of the cached entry changes.
-const getManifest = createCache(
-	'manifest.v5',
-	{ ttl: MANIFEST_TTL, staleTtl: MANIFEST_STALE_TTL },
-	buildManifest,
-);
 
 function jsonError(
 	status: number,
@@ -48,7 +35,7 @@ function jsonError(
 function errorResponse(error: unknown): Response {
 	if (error instanceof UpstreamError) {
 		return error.kind === 'not_found'
-			? jsonError(404, 'No such dev build artifact')
+			? jsonError(404, error.message)
 			: jsonError(502, 'Upstream unavailable', { 'Retry-After': '60' });
 	}
 
@@ -57,21 +44,79 @@ function errorResponse(error: unknown): Response {
 	return jsonError(500, 'Internal error');
 }
 
-function decodeSegment(segment: string): string | null {
+interface RouteContext {
+	request: Request;
+	env: Env;
+	ctx: ExecutionContext;
+	url: URL;
+	// Named groups of the matched path, percent-decoded.
+	params: Record<string, string>;
+}
+
+interface Route {
+	pattern: URLPattern;
+	// The edge cache is keyed on the full URL, so every spelling of a request other than the
+	// canonical one is rejected, or each would reach GitHub on its own. Null accepts any query string.
+	query: string[] | null;
+	handle: (context: RouteContext) => Response | Promise<Response>;
+}
+
+function route(
+	pathname: string,
+	handle: Route['handle'],
+	query: string[] | null,
+): Route {
+	return { pattern: new URLPattern({ pathname }), query, handle };
+}
+
+// Null when a group is malformed, or is not encoded the way the manifest encodes it.
+function decodeParams(
+	groups: Record<string, string>,
+): Record<string, string> | null {
+	const params: Record<string, string> = {};
+
 	try {
-		return decodeURIComponent(segment);
+		for (const [name, value] of Object.entries(groups)) {
+			const decoded = decodeURIComponent(value);
+
+			if (encodeURIComponent(decoded) !== value) {
+				return null;
+			}
+
+			params[name] = decoded;
+		}
 	} catch {
 		return null;
 	}
+
+	return params;
 }
 
-async function handleManifest(
-	request: Request,
-	env: Env,
-	ctx: ExecutionContext,
-	origin: string,
-): Promise<Response> {
-	const { manifest } = await getManifest(ctx, env, origin);
+// The query string with only the allowed keys, once each, in their declared order.
+function canonicalSearch(url: URL, allowed: string[]): string {
+	const canonical = new URLSearchParams();
+
+	for (const key of allowed) {
+		const value = url.searchParams.get(key);
+
+		if (value !== null) {
+			canonical.set(key, value);
+		}
+	}
+
+	return canonical.size > 0 ? `?${canonical}` : '';
+}
+
+function handleHome(): Response {
+	return Response.redirect(HOME_URL, 302);
+}
+
+async function handleManifest({
+	request,
+	env,
+	ctx,
+}: RouteContext): Promise<Response> {
+	const { manifest } = await getManifest(ctx, env);
 
 	return new Response(
 		request.method === 'HEAD' ? null : JSON.stringify(manifest),
@@ -88,14 +133,20 @@ async function handleManifest(
 
 // Only files from a current or recent manifest are resolved, so artifact ids cannot be
 // enumerated through the token.
-async function handleArtifact(
-	env: Env,
-	ctx: ExecutionContext,
-	origin: string,
-	fileName: string,
-	sha256: string | null,
-): Promise<Response> {
-	const { artifactIds } = await getManifest(ctx, env, origin);
+async function handleArtifact({
+	env,
+	ctx,
+	url,
+	params,
+}: RouteContext): Promise<Response> {
+	const fileName = params.fileName ?? '';
+	const sha256 = url.searchParams.get('sha256');
+
+	if (sha256 !== null && !/^[0-9a-f]{64}$/.test(sha256)) {
+		return jsonError(400, 'Malformed sha256');
+	}
+
+	const { artifactIds } = await getManifest(ctx, env);
 
 	// hasOwn keeps a name like "constructor" from hitting the prototype.
 	const builds = Object.hasOwn(artifactIds, fileName)
@@ -103,7 +154,7 @@ async function handleArtifact(
 		: undefined;
 
 	if (!builds) {
-		throw new UpstreamError('not_found', 'No such dev build artifact');
+		return jsonError(404, 'No such dev build artifact');
 	}
 
 	const build = sha256
@@ -111,8 +162,8 @@ async function handleArtifact(
 		: builds[0];
 
 	if (!build) {
-		throw new UpstreamError(
-			'not_found',
+		return jsonError(
+			404,
 			'No dev build artifact with that hash is available anymore',
 		);
 	}
@@ -127,6 +178,12 @@ async function handleArtifact(
 	});
 }
 
+const ROUTES: Route[] = [
+	route('/', handleHome, null),
+	route('/v1/latest.json', handleManifest, []),
+	route('/v1/dev/:fileName', handleArtifact, ['sha256']),
+];
+
 async function handleRequest(
 	request: Request,
 	env: Env,
@@ -138,43 +195,33 @@ async function handleRequest(
 
 	const url = new URL(request.url);
 
-	if (url.pathname === '/') {
-		return Response.redirect(HOME_URL, 302);
-	}
+	for (const { pattern, query, handle } of ROUTES) {
+		const match = pattern.exec(url.href);
 
-	const devFile = url.pathname.match(/^\/dev\/([^/]+)$/)?.[1];
-
-	if (url.pathname !== '/v1/latest.json' && devFile === undefined) {
-		return jsonError(404, 'Not found');
-	}
-
-	// The edge cache is keyed on the full URL, so a stray query string would bypass it.
-	const allowedParam = devFile === undefined ? null : 'sha256';
-
-	for (const key of url.searchParams.keys()) {
-		if (key !== allowedParam) {
-			return jsonError(400, 'Unexpected query parameter');
+		if (!match) {
+			continue;
 		}
+
+		if (query && url.search !== canonicalSearch(url, query)) {
+			return jsonError(400, 'Unexpected query string');
+		}
+
+		const params = decodeParams(match.pathname.groups);
+
+		if (params === null) {
+			return jsonError(400, 'Malformed path');
+		}
+
+		return handle({
+			request,
+			env,
+			ctx,
+			url,
+			params,
+		});
 	}
 
-	// Never taken from the request: it prefixes cache keys and is embedded in the shared manifest.
-	const origin = env.PUBLIC_ORIGIN ?? url.origin;
-
-	if (devFile === undefined) {
-		return handleManifest(request, env, ctx, origin);
-	}
-
-	const fileName = decodeSegment(devFile);
-	const sha256 = url.searchParams.get('sha256')?.toLowerCase() ?? null;
-
-	if (
-		fileName === null ||
-		(sha256 !== null && !/^[0-9a-f]{64}$/.test(sha256))
-	) {
-		return jsonError(400, 'Malformed path');
-	}
-
-	return handleArtifact(env, ctx, origin, fileName, sha256);
+	return jsonError(404, 'Not found');
 }
 
 export default {

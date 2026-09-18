@@ -10,25 +10,12 @@ import {
 
 // Files the GUI knows how to install, mapped to their runtime identifier. Artifacts must be
 // uploaded with archive: false so the artifact name and digest are those of the file itself.
-const GUI_ASSETS = {
-	'Source2Viewer.exe': 'win-x64',
-} as const satisfies Record<string, string>;
-
-type GuiFileName = keyof typeof GUI_ASSETS;
-
-interface FileItem {
-	name: string;
-	digest?: string | null;
-	size?: number;
-	size_in_bytes?: number;
-}
-
-type GuiFile<T extends FileItem> = T & { name: GuiFileName };
+const GUI_ASSETS = new Map([['Source2Viewer.exe', 'win-x64']]);
 
 interface ManifestAsset {
 	name: string;
 	url: string;
-	size: number | null;
+	size: number;
 	sha256: string | null;
 }
 
@@ -62,22 +49,18 @@ interface ArtifactRef {
 // Recent builds of each file name, newest first.
 export type ArtifactIds = Record<string, ArtifactRef[]>;
 
+// Anything but a well-formed sha256 is dropped, so a hash that made it into a download link is
+// one the download route accepts.
 function parseDigest(digest: string | null | undefined): string | null {
-	const [algorithm, hash] = digest?.split(':') ?? [];
-
-	return algorithm === 'sha256' && hash ? hash.toLowerCase() : null;
-}
-
-function isGuiFileName(name: string): name is GuiFileName {
-	return Object.hasOwn(GUI_ASSETS, name);
+	return digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1] ?? null;
 }
 
 // GitHub lists newest first, so the first occurrence of a name wins.
-function guiFiles<T extends FileItem>(items: T[]): GuiFile<T>[] {
+function guiFiles<T extends { name: string }>(items: T[]): T[] {
 	const seen = new Set<string>();
 
-	return items.filter((item): item is GuiFile<T> => {
-		if (!isGuiFileName(item.name) || seen.has(item.name)) {
+	return items.filter((item) => {
+		if (!GUI_ASSETS.has(item.name) || seen.has(item.name)) {
 			return false;
 		}
 
@@ -87,19 +70,15 @@ function guiFiles<T extends FileItem>(items: T[]): GuiFile<T>[] {
 	});
 }
 
-function collectAssets<T extends FileItem>(
-	items: GuiFile<T>[],
-	url: (item: T) => string,
-): Record<string, ManifestAsset> {
+function collectAssets(files: ManifestAsset[]): Record<string, ManifestAsset> {
 	const assets: Record<string, ManifestAsset> = {};
 
-	for (const item of items) {
-		assets[GUI_ASSETS[item.name]] = {
-			name: item.name,
-			url: url(item),
-			size: item.size ?? item.size_in_bytes ?? null,
-			sha256: parseDigest(item.digest),
-		};
+	for (const file of files) {
+		const runtime = GUI_ASSETS.get(file.name);
+
+		if (runtime) {
+			assets[runtime] = file;
+		}
 	}
 
 	return assets;
@@ -111,16 +90,20 @@ function buildStable(release: Release): StableChannel {
 		date: release.published_at,
 		releaseNotesUrl: release.html_url,
 		assets: collectAssets(
-			guiFiles(release.assets),
-			(asset) => asset.browser_download_url,
+			guiFiles(release.assets).map((asset) => ({
+				name: asset.name,
+				url: asset.browser_download_url,
+				size: asset.size,
+				sha256: parseDigest(asset.digest),
+			})),
 		),
 	};
 }
 
 function buildDev(
+	env: Env,
 	run: WorkflowRun | null,
-	artifacts: GuiFile<Artifact>[],
-	origin: string,
+	artifacts: Artifact[],
 ): DevChannel | null {
 	if (!run) {
 		return null;
@@ -139,12 +122,19 @@ function buildDev(
 		runUrl: run.html_url,
 		// The hash pins the download to this build, so a manifest cached just before a newer
 		// build landed still fetches the file it describes.
-		assets: collectAssets(artifacts, (artifact) => {
-			const url = `${origin}/dev/${encodeURIComponent(artifact.name)}`;
-			const digest = parseDigest(artifact.digest);
+		assets: collectAssets(
+			artifacts.map((artifact) => {
+				const url = `${env.PUBLIC_ORIGIN}/v1/dev/${encodeURIComponent(artifact.name)}`;
+				const sha256 = parseDigest(artifact.digest);
 
-			return digest ? `${url}?sha256=${digest}` : url;
-		}),
+				return {
+					name: artifact.name,
+					url: sha256 ? `${url}?sha256=${sha256}` : url,
+					size: artifact.size_in_bytes,
+					sha256,
+				};
+			}),
+		),
 	};
 }
 
@@ -152,12 +142,13 @@ function buildDev(
 const KEPT_BUILDS = 5;
 
 // Artifact ids stay out of the public manifest so they cannot be enumerated. Ids from the
-// previous manifest are carried along for clients holding a slightly older one.
+// previous manifest are carried along for clients holding a slightly older one, including those
+// of a file the newest build happens to lack.
 function collectArtifactIds(
 	artifacts: Artifact[],
 	previous: ArtifactIds | undefined,
 ): ArtifactIds {
-	const ids: ArtifactIds = {};
+	const ids: ArtifactIds = { ...previous };
 
 	for (const artifact of artifacts) {
 		const current: ArtifactRef = {
@@ -174,7 +165,7 @@ function collectArtifactIds(
 	return ids;
 }
 
-// A dev channel failure must not take the stable channel down with it.
+// A dev channel failure must not take the stable channel down with it. Null when it failed.
 async function loadDev(env: Env) {
 	try {
 		const run = await getLatestWorkflowRun(env);
@@ -187,7 +178,7 @@ async function loadDev(env: Env) {
 	} catch (error) {
 		console.error(`Dev channel unavailable: ${errorMessage(error)}`);
 
-		return { run: null, artifacts: [] };
+		return null;
 	}
 }
 
@@ -198,19 +189,25 @@ export interface BuiltManifest {
 
 export async function buildManifest(
 	env: Env,
-	origin: string,
 	previous: BuiltManifest | undefined,
 ): Promise<BuiltManifest> {
-	const [release, { run, artifacts }] = await Promise.all([
+	const [release, dev] = await Promise.all([
 		getLatestRelease(env),
 		loadDev(env),
 	]);
 
+	const stable = buildStable(release);
+
+	// The previous dev channel outlives a failure, or its download links would die with it.
+	if (!dev) {
+		return {
+			manifest: { stable, dev: previous?.manifest.dev ?? null },
+			artifactIds: previous?.artifactIds ?? {},
+		};
+	}
+
 	return {
-		manifest: {
-			stable: buildStable(release),
-			dev: buildDev(run, artifacts, origin),
-		},
-		artifactIds: collectArtifactIds(artifacts, previous?.artifactIds),
+		manifest: { stable, dev: buildDev(env, dev.run, dev.artifacts) },
+		artifactIds: collectArtifactIds(dev.artifacts, previous?.artifactIds),
 	};
 }

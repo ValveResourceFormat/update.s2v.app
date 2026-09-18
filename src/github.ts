@@ -1,4 +1,4 @@
-import { UpstreamError } from './errors.ts';
+import { errorMessage, UpstreamError } from './errors.ts';
 
 const API_BASE = 'https://api.github.com';
 const USER_AGENT =
@@ -49,6 +49,22 @@ export interface Artifact {
 	expires_at: string | null;
 }
 
+const REQUEST_TIMEOUT = 10_000;
+
+async function request(url: string, init: RequestInit): Promise<Response> {
+	try {
+		return await fetch(url, {
+			...init,
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT),
+		});
+	} catch (error) {
+		throw new UpstreamError(
+			'upstream',
+			`GitHub API request failed: ${errorMessage(error)}`,
+		);
+	}
+}
+
 function headers(env: Env, withToken: boolean): Record<string, string> {
 	const result: Record<string, string> = {
 		Accept: 'application/vnd.github+json',
@@ -64,7 +80,7 @@ function headers(env: Env, withToken: boolean): Record<string, string> {
 }
 
 async function apiJson<T>(env: Env, path: string): Promise<T> {
-	let response = await fetch(`${API_BASE}${path}`, {
+	let response = await request(`${API_BASE}${path}`, {
 		headers: headers(env, true),
 	});
 
@@ -73,7 +89,7 @@ async function apiJson<T>(env: Env, path: string): Promise<T> {
 	if (response.status === 401 && env.GITHUB_TOKEN) {
 		console.error('GITHUB_TOKEN was rejected, retrying without it');
 
-		response = await fetch(`${API_BASE}${path}`, {
+		response = await request(`${API_BASE}${path}`, {
 			headers: headers(env, false),
 		});
 	}
@@ -167,7 +183,7 @@ export async function getArtifactDownloadUrl(
 		throw new UpstreamError('config', 'GITHUB_TOKEN is not configured');
 	}
 
-	const response = await fetch(
+	const response = await request(
 		`${API_BASE}/repositories/${env.GITHUB_REPO_ID}/actions/artifacts/${artifactId}/zip`,
 		{
 			headers: headers(env, true),

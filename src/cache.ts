@@ -1,159 +1,97 @@
-// Stale-on-error cache over the per-location Cache API. Each key keeps the last good value and the
-// last failure. An expired value is refreshed before being served; if that fails, the old value is
-// served and the producer is left alone for FAILURE_TTL, so a GitHub outage degrades to a slightly
-// old manifest rather than errors or a request storm.
+// The built manifest, kept in the per-location Cache API with stale-on-error behaviour. An expired
+// manifest is rebuilt before being served; if that fails, the old one is served and GitHub is left
+// alone for FAILURE_TTL, so an outage degrades to a slightly old manifest rather than errors or a
+// request storm.
 
 import { errorMessage, UpstreamError } from './errors.ts';
+import { type BuiltManifest, buildManifest } from './manifest.ts';
+
+// How long a manifest is served before GitHub is asked again, and how long an old one may be
+// served while GitHub is unavailable.
+export const MANIFEST_TTL = 120;
+export const MANIFEST_STALE_TTL = 86400;
 
 const FAILURE_TTL = 60;
 
-type CachedFailure = Pick<UpstreamError, 'kind' | 'message'>;
+// Bump the key when the shape of the cached entry changes.
+const CACHE_PATH = '/.cache/manifest.v7';
 
-interface Produced<T> {
-	value: T;
-	producedAt: number;
+interface CacheEntry {
+	// The last good manifest, kept through failed rebuilds until staleAt.
+	value: BuiltManifest | undefined;
+	staleAt: number;
+	// GitHub is not asked again before this.
+	retryAt: number;
 }
 
-interface Failed {
-	failure: CachedFailure;
-	failedAt: number;
-}
-
-interface CacheEntry<T> {
-	produced: Produced<T> | null;
-	failed: Failed | null;
-}
-
-interface CacheLifetime {
-	ttl: number;
-	staleTtl: number;
-}
-
-type Producer<T> = (
-	env: Env,
-	origin: string,
-	previous: T | undefined,
-) => Promise<T>;
-
-function isRecent(timestamp: number, ttl: number): boolean {
-	return Date.now() - timestamp < ttl * 1000;
-}
-
-async function readEntry<T>(
-	cache: Cache,
-	key: Request,
-): Promise<CacheEntry<T> | undefined> {
+async function readEntry(key: Request): Promise<CacheEntry | undefined> {
 	try {
-		const response = await cache.match(key);
+		const response = await caches.default.match(key);
 
-		return response ? await response.json<CacheEntry<T>>() : undefined;
+		return response ? await response.json<CacheEntry>() : undefined;
 	} catch {
 		// A corrupt entry is treated as a miss and gets overwritten.
 		return undefined;
 	}
 }
 
-function writeEntry<T>(
+function writeEntry(
 	ctx: ExecutionContext,
-	cache: Cache,
 	key: Request,
-	entry: CacheEntry<T>,
-	ttl: number,
+	entry: CacheEntry,
 ): void {
 	const response = new Response(JSON.stringify(entry), {
 		headers: {
 			'Content-Type': 'application/json',
-			'Cache-Control': `public, s-maxage=${ttl}`,
+			'Cache-Control': `public, s-maxage=${MANIFEST_STALE_TTL}`,
 		},
 	});
 
-	ctx.waitUntil(cache.put(key, response).catch(() => {}));
+	ctx.waitUntil(caches.default.put(key, response).catch(() => {}));
 }
 
-function describeFailure(error: unknown): CachedFailure {
-	return error instanceof UpstreamError
-		? { kind: error.kind, message: error.message }
-		: { kind: 'upstream', message: errorMessage(error) };
-}
+export async function getManifest(
+	ctx: ExecutionContext,
+	env: Env,
+): Promise<BuiltManifest> {
+	const key = new Request(`${env.PUBLIC_ORIGIN}${CACHE_PATH}`);
+	const entry = await readEntry(key);
+	const now = Date.now();
+	const previous = entry && now < entry.staleAt ? entry.value : undefined;
 
-export function createCache<T>(
-	name: string,
-	{ ttl, staleTtl }: CacheLifetime,
-	produce: Producer<T>,
-) {
-	// Concurrent refreshes within an isolate share a single producer call.
-	let pending: Promise<T> | undefined;
-
-	async function refresh(
-		ctx: ExecutionContext,
-		env: Env,
-		origin: string,
-		cache: Cache,
-		key: Request,
-		produced: Produced<T> | null,
-	): Promise<T> {
-		try {
-			const value = await produce(env, origin, produced?.value);
-
-			writeEntry(
-				ctx,
-				cache,
-				key,
-				{ produced: { value, producedAt: Date.now() }, failed: null },
-				staleTtl,
-			);
-
-			return value;
-		} catch (error) {
-			const failure = describeFailure(error);
-
-			writeEntry(
-				ctx,
-				cache,
-				key,
-				{ produced, failed: { failure, failedAt: Date.now() } },
-				produced ? staleTtl : FAILURE_TTL,
-			);
-
-			if (!produced) {
-				throw error;
-			}
-
-			console.error(`Serving stale ${key.url}: ${failure.message}`);
-
-			return produced.value;
+	if (entry && now < entry.retryAt) {
+		if (previous !== undefined) {
+			return previous;
 		}
+
+		throw new UpstreamError('upstream', 'Manifest is unavailable');
 	}
 
-	return async (
-		ctx: ExecutionContext,
-		env: Env,
-		origin: string,
-	): Promise<T> => {
-		const cache = caches.default;
-		const key = new Request(`${origin}/.cache/${name}`);
-		const entry = await readEntry<T>(cache, key);
-		const produced = entry?.produced ?? null;
-		const failed = entry?.failed;
+	// Not served stale while revalidating: the edge cache in front would hold the old value for
+	// another full cycle, delaying a new build at every layer.
+	try {
+		const value = await buildManifest(env, previous);
 
-		if (produced && isRecent(produced.producedAt, ttl)) {
-			return produced.value;
-		}
-
-		if (failed && isRecent(failed.failedAt, FAILURE_TTL)) {
-			if (produced) {
-				return produced.value;
-			}
-
-			throw new UpstreamError(failed.failure.kind, failed.failure.message);
-		}
-
-		// Not served stale while revalidating: the edge cache in front would hold the old value for
-		// another full cycle, delaying a new build at every layer.
-		pending ??= refresh(ctx, env, origin, cache, key, produced).finally(() => {
-			pending = undefined;
+		writeEntry(ctx, key, {
+			value,
+			staleAt: now + MANIFEST_STALE_TTL * 1000,
+			retryAt: now + MANIFEST_TTL * 1000,
 		});
 
-		return pending;
-	};
+		return value;
+	} catch (error) {
+		console.error(`Manifest rebuild failed: ${errorMessage(error)}`);
+
+		writeEntry(ctx, key, {
+			value: previous,
+			staleAt: entry?.staleAt ?? 0,
+			retryAt: now + FAILURE_TTL * 1000,
+		});
+
+		if (previous === undefined) {
+			throw error;
+		}
+
+		return previous;
+	}
 }
