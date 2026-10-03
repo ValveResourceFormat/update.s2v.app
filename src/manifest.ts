@@ -102,13 +102,9 @@ function buildStable(release: Release): StableChannel {
 
 function buildDev(
 	env: Env,
-	run: WorkflowRun | null,
+	run: WorkflowRun,
 	artifacts: Artifact[],
-): DevChannel | null {
-	if (!run) {
-		return null;
-	}
-
+): DevChannel {
 	return {
 		buildNumber: run.run_number,
 		commit: run.head_sha,
@@ -169,12 +165,30 @@ function collectArtifactIds(
 async function loadDev(env: Env) {
 	try {
 		const run = await getLatestWorkflowRun(env);
-		const artifacts = run ? await getRunArtifacts(env, run.id) : [];
 
-		return {
-			run,
-			artifacts: guiFiles(artifacts.filter((artifact) => !artifact.expired)),
-		};
+		if (!run) {
+			console.error('Dev channel unavailable: no successful run found');
+
+			return null;
+		}
+
+		const artifacts = guiFiles(
+			(await getRunArtifacts(env, run.id)).filter(
+				(artifact) => !artifact.expired,
+			),
+		);
+
+		for (const name of GUI_ASSETS.keys()) {
+			const artifact = artifacts.find((entry) => entry.name === name);
+
+			if (!artifact) {
+				console.error(`Dev build ${run.run_number} has no ${name}`);
+			} else if (parseDigest(artifact.digest) === null) {
+				console.error(`Dev build ${run.run_number} has no sha256 for ${name}`);
+			}
+		}
+
+		return { run, artifacts };
 	} catch (error) {
 		console.error(`Dev channel unavailable: ${errorMessage(error)}`);
 
@@ -197,9 +211,22 @@ export async function buildManifest(
 	]);
 
 	const stable = buildStable(release);
+	const previousBuild = previous?.manifest.dev?.buildNumber;
+
+	// Build numbers only grow, so an older run is a bad answer from GitHub, not news.
+	const wentBack =
+		dev !== null &&
+		previousBuild !== undefined &&
+		dev.run.run_number < previousBuild;
+
+	if (wentBack) {
+		console.error(
+			`Dev build went back from ${previousBuild} to ${dev.run.run_number}, keeping ${previousBuild}`,
+		);
+	}
 
 	// The previous dev channel outlives a failure, or its download links would die with it.
-	if (!dev) {
+	if (!dev || wentBack) {
 		return {
 			manifest: { stable, dev: previous?.manifest.dev ?? null },
 			artifactIds: previous?.artifactIds ?? {},

@@ -33,6 +33,7 @@ export interface WorkflowRun {
 	run_number: number;
 	head_sha: string;
 	head_branch: string | null;
+	event: string;
 	display_title: string;
 	updated_at: string;
 	html_url: string;
@@ -112,20 +113,20 @@ export function getLatestRelease(env: Env): Promise<Release> {
 }
 
 // Events that can only be triggered from the repository itself. The branch filter alone is not
-// enough, since a pull request from a fork can also have a head branch called master. The API
-// takes one event per query, so each is queried and the newest run wins. Scheduled runs are
-// included because they keep artifacts from expiring on a quiet branch.
+// enough, since a pull request from a fork can also have a head branch called master. Scheduled
+// runs are included because they keep artifacts from expiring on a quiet branch.
 const TRUSTED_EVENTS = ['push', 'schedule'];
 
-async function getLatestRunForEvent(
+export async function getLatestWorkflowRun(
 	env: Env,
-	event: string,
 ): Promise<WorkflowRun | null> {
+	// Events are filtered here rather than in the query, which takes one event at a time. Querying
+	// each and taking the newest once let an empty answer for push hand the channel to a days-old
+	// scheduled run. Runs from other events on this branch are rare, so one page is enough.
 	const query = new URLSearchParams({
 		branch: env.GITHUB_BRANCH,
-		event,
 		status: 'success',
-		per_page: '1',
+		per_page: '20',
 	});
 
 	const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
@@ -133,30 +134,14 @@ async function getLatestRunForEvent(
 		`/repositories/${env.GITHUB_REPO_ID}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
 	);
 
-	const run = data.workflow_runs[0];
-
-	if (
-		run?.conclusion !== 'success' ||
-		run.head_branch !== env.GITHUB_BRANCH ||
-		run.head_repository.id !== Number(env.GITHUB_REPO_ID)
-	) {
-		return null;
-	}
-
-	return run;
-}
-
-export async function getLatestWorkflowRun(
-	env: Env,
-): Promise<WorkflowRun | null> {
-	const runs = await Promise.all(
-		TRUSTED_EVENTS.map((event) => getLatestRunForEvent(env, event)),
-	);
-
-	return runs.reduce<WorkflowRun | null>(
-		(best, run) =>
-			run && (!best || run.run_number > best.run_number) ? run : best,
-		null,
+	return (
+		data.workflow_runs.find(
+			(run) =>
+				TRUSTED_EVENTS.includes(run.event) &&
+				run.conclusion === 'success' &&
+				run.head_branch === env.GITHUB_BRANCH &&
+				run.head_repository.id === Number(env.GITHUB_REPO_ID),
+		) ?? null
 	);
 }
 

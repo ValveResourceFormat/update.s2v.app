@@ -1,5 +1,5 @@
 import { getManifest, MANIFEST_STALE_TTL, MANIFEST_TTL } from './cache.ts';
-import { UpstreamError } from './errors.ts';
+import { errorMessage, UpstreamError } from './errors.ts';
 import { getArtifactDownloadUrl } from './github.ts';
 
 // Edge cache lifetimes. s-maxage must not be used here, since it disables both stale behaviours.
@@ -168,10 +168,25 @@ async function handleArtifact({
 		);
 	}
 
+	let location: string;
+
+	try {
+		location = await getArtifactDownloadUrl(env, build.id);
+	} catch (error) {
+		// Logged here rather than in errorResponse, so a failing manifest is not logged per request.
+		if (!(error instanceof UpstreamError && error.kind === 'not_found')) {
+			console.error(
+				`Artifact ${build.id} download failed: ${errorMessage(error)}`,
+			);
+		}
+
+		throw error;
+	}
+
 	return new Response(null, {
 		status: 302,
 		headers: {
-			Location: await getArtifactDownloadUrl(env, build.id),
+			Location: location,
 			'Cache-Control': REDIRECT_CACHE_CONTROL,
 			...CORS_HEADERS,
 		},
