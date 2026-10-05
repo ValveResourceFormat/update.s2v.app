@@ -120,13 +120,12 @@ const TRUSTED_EVENTS = ['push', 'schedule'];
 export async function getLatestWorkflowRun(
 	env: Env,
 ): Promise<WorkflowRun | null> {
-	// Events are filtered here rather than in the query, which takes one event at a time. Querying
-	// each and taking the newest once let an empty answer for push hand the channel to a days-old
-	// scheduled run. Runs from other events on this branch are rare, so one page is enough.
+	// Everything is filtered here rather than in the query. Filtered queries are answered by a
+	// search index that intermittently returns a partial result with runs months old on top, while
+	// the plain listing is always newest first. A page of runs from every branch reaches back
+	// about two weeks, far past the newest successful one on this branch.
 	const query = new URLSearchParams({
-		branch: env.GITHUB_BRANCH,
-		status: 'success',
-		per_page: '20',
+		per_page: '100',
 	});
 
 	const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
