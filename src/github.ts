@@ -117,31 +117,51 @@ export function getLatestRelease(env: Env): Promise<Release> {
 // runs are included because they keep artifacts from expiring on a quiet branch.
 const TRUSTED_EVENTS = ['push', 'schedule'];
 
+// GitHub takes about 30 ms per listed run to answer, so a full page of a hundred costs seconds,
+// while the newest successful run on this branch is nearly always among the first few.
+const RUNS_PAGE_SIZE = 10;
+// A hundred runs from every branch reach back about two weeks.
+const RUNS_MAX_PAGES = 10;
+
+function isTrustedRun(env: Env, run: WorkflowRun): boolean {
+	return (
+		TRUSTED_EVENTS.includes(run.event) &&
+		run.conclusion === 'success' &&
+		run.head_branch === env.GITHUB_BRANCH &&
+		run.head_repository.id === Number(env.GITHUB_REPO_ID)
+	);
+}
+
 export async function getLatestWorkflowRun(
 	env: Env,
 ): Promise<WorkflowRun | null> {
 	// Everything is filtered here rather than in the query. Filtered queries are answered by a
 	// search index that intermittently returns a partial result with runs months old on top, while
-	// the plain listing is always newest first. A page of runs from every branch reaches back
-	// about two weeks, far past the newest successful one on this branch.
-	const query = new URLSearchParams({
-		per_page: '100',
-	});
+	// the plain listing is always newest first. A run that lands while paging shifts the listing
+	// down, so a run can be seen twice but never skipped.
+	for (let page = 1; page <= RUNS_MAX_PAGES; page++) {
+		const query = new URLSearchParams({
+			per_page: String(RUNS_PAGE_SIZE),
+			page: String(page),
+		});
 
-	const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
-		env,
-		`/repositories/${env.GITHUB_REPO_ID}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
-	);
+		const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
+			env,
+			`/repositories/${env.GITHUB_REPO_ID}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
+		);
 
-	return (
-		data.workflow_runs.find(
-			(run) =>
-				TRUSTED_EVENTS.includes(run.event) &&
-				run.conclusion === 'success' &&
-				run.head_branch === env.GITHUB_BRANCH &&
-				run.head_repository.id === Number(env.GITHUB_REPO_ID),
-		) ?? null
-	);
+		const run = data.workflow_runs.find((entry) => isTrustedRun(env, entry));
+
+		if (run) {
+			return run;
+		}
+
+		if (data.workflow_runs.length < RUNS_PAGE_SIZE) {
+			return null;
+		}
+	}
+
+	return null;
 }
 
 export async function getRunArtifacts(
