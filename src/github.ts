@@ -1,20 +1,14 @@
-import { errorMessage, UpstreamError } from './errors.ts';
+import { errorMessage } from './errors.ts';
 
 const API_BASE = 'https://api.github.com';
 const USER_AGENT =
 	'update.s2v.app (+https://github.com/ValveResourceFormat/ValveResourceFormat)';
 
-// An unknown host is logged, not rejected: GitHub has moved artifact storage before, and rejecting
-// would break every download on the next move.
-const KNOWN_DOWNLOAD_HOSTS = [
-	'.blob.core.windows.net',
-	'.githubusercontent.com',
-	'.github.com',
-];
+const REQUEST_TIMEOUT = 10_000;
 
 // Only the fields this worker reads. Responses are not validated at runtime.
 
-interface ReleaseAsset {
+export interface ReleaseAsset {
 	name: string;
 	size: number;
 	digest?: string | null;
@@ -29,16 +23,9 @@ export interface Release {
 }
 
 export interface WorkflowRun {
-	id: number;
-	run_number: number;
 	head_sha: string;
-	head_branch: string | null;
-	event: string;
 	display_title: string;
-	updated_at: string;
 	html_url: string;
-	conclusion: string | null;
-	head_repository: { id: number };
 }
 
 export interface Artifact {
@@ -46,60 +33,34 @@ export interface Artifact {
 	name: string;
 	size_in_bytes: number;
 	digest?: string | null;
-	expired: boolean;
-	expires_at: string | null;
 }
 
-const REQUEST_TIMEOUT = 10_000;
-
-async function request(url: string, init: RequestInit): Promise<Response> {
+async function apiRequest(
+	env: Env,
+	path: string,
+	init?: RequestInit,
+): Promise<Response> {
 	try {
-		return await fetch(url, {
+		return await fetch(`${API_BASE}${path}`, {
 			...init,
+			headers: {
+				Accept: 'application/vnd.github+json',
+				Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+				'User-Agent': USER_AGENT,
+				'X-GitHub-Api-Version': '2026-03-10',
+			},
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT),
 		});
 	} catch (error) {
-		throw new UpstreamError(
-			'upstream',
-			`GitHub API request failed: ${errorMessage(error)}`,
-		);
+		throw new Error(`GitHub API request failed: ${errorMessage(error)}`);
 	}
-}
-
-function headers(env: Env, withToken: boolean): Record<string, string> {
-	const result: Record<string, string> = {
-		Accept: 'application/vnd.github+json',
-		'User-Agent': USER_AGENT,
-		'X-GitHub-Api-Version': '2026-03-10',
-	};
-
-	if (withToken && env.GITHUB_TOKEN) {
-		result.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
-	}
-
-	return result;
 }
 
 async function apiJson<T>(env: Env, path: string): Promise<T> {
-	let response = await request(`${API_BASE}${path}`, {
-		headers: headers(env, true),
-	});
-
-	// An expired or revoked token gets every request rejected, even for public data.
-	// Retrying anonymously keeps the manifest alive until the token is rotated.
-	if (response.status === 401 && env.GITHUB_TOKEN) {
-		console.error('GITHUB_TOKEN was rejected, retrying without it');
-
-		response = await request(`${API_BASE}${path}`, {
-			headers: headers(env, false),
-		});
-	}
+	const response = await apiRequest(env, path);
 
 	if (!response.ok) {
-		throw new UpstreamError(
-			'upstream',
-			`GitHub API ${path} returned ${response.status}`,
-		);
+		throw new Error(`GitHub API ${path} returned ${response.status}`);
 	}
 
 	return response.json<T>();
@@ -112,61 +73,16 @@ export function getLatestRelease(env: Env): Promise<Release> {
 	);
 }
 
-// Events that can only be triggered from the repository itself. The branch filter alone is not
-// enough, since a pull request from a fork can also have a head branch called master. Scheduled
-// runs are included because they keep artifacts from expiring on a quiet branch.
-const TRUSTED_EVENTS = ['push', 'schedule'];
-
-// GitHub takes about 30 ms per listed run to answer, so a full page of a hundred costs seconds,
-// while the newest successful run on this branch is nearly always among the first few.
-const RUNS_PAGE_SIZE = 10;
-// A hundred runs from every branch reach back about two weeks.
-const RUNS_MAX_PAGES = 10;
-
-function isTrustedRun(env: Env, run: WorkflowRun): boolean {
-	return (
-		TRUSTED_EVENTS.includes(run.event) &&
-		run.conclusion === 'success' &&
-		run.head_branch === env.GITHUB_BRANCH &&
-		run.head_repository.id === Number(env.GITHUB_REPO_ID)
+export function getWorkflowRun(env: Env, runId: string): Promise<WorkflowRun> {
+	return apiJson<WorkflowRun>(
+		env,
+		`/repositories/${env.GITHUB_REPO_ID}/actions/runs/${runId}`,
 	);
-}
-
-export async function getLatestWorkflowRun(
-	env: Env,
-): Promise<WorkflowRun | null> {
-	// Everything is filtered here rather than in the query. Filtered queries are answered by a
-	// search index that intermittently returns a partial result with runs months old on top, while
-	// the plain listing is always newest first. A run that lands while paging shifts the listing
-	// down, so a run can be seen twice but never skipped.
-	for (let page = 1; page <= RUNS_MAX_PAGES; page++) {
-		const query = new URLSearchParams({
-			per_page: String(RUNS_PAGE_SIZE),
-			page: String(page),
-		});
-
-		const data = await apiJson<{ workflow_runs: WorkflowRun[] }>(
-			env,
-			`/repositories/${env.GITHUB_REPO_ID}/actions/workflows/${env.GITHUB_WORKFLOW}/runs?${query}`,
-		);
-
-		const run = data.workflow_runs.find((entry) => isTrustedRun(env, entry));
-
-		if (run) {
-			return run;
-		}
-
-		if (data.workflow_runs.length < RUNS_PAGE_SIZE) {
-			return null;
-		}
-	}
-
-	return null;
 }
 
 export async function getRunArtifacts(
 	env: Env,
-	runId: number,
+	runId: string,
 ): Promise<Artifact[]> {
 	// A run uploads far fewer than a hundred artifacts, so one page is enough.
 	const data = await apiJson<{ artifacts: Artifact[] }>(
@@ -177,63 +93,33 @@ export async function getRunArtifacts(
 	return data.artifacts;
 }
 
-// Answers with a short-lived signed URL in the Location header. Needs authentication even for
-// public repositories, which is the reason this worker exists.
+// Answers with a signed URL in the Location header, valid for about a minute.
 export async function getArtifactDownloadUrl(
 	env: Env,
 	artifactId: number,
 ): Promise<string> {
-	if (!env.GITHUB_TOKEN) {
-		throw new UpstreamError('config', 'GITHUB_TOKEN is not configured');
-	}
-
-	const response = await request(
-		`${API_BASE}/repositories/${env.GITHUB_REPO_ID}/actions/artifacts/${artifactId}/zip`,
-		{
-			headers: headers(env, true),
-			redirect: 'manual',
-		},
+	const response = await apiRequest(
+		env,
+		`/repositories/${env.GITHUB_REPO_ID}/actions/artifacts/${artifactId}/zip`,
+		{ redirect: 'manual' },
 	);
 
 	// Only the headers are needed.
 	await response.body?.cancel();
 
-	if (response.status === 410) {
-		throw new UpstreamError('not_found', 'Artifact has expired');
-	}
-
 	const location = response.headers.get('Location');
 
-	if (!location) {
-		throw new UpstreamError(
-			'upstream',
-			`GitHub API artifact download returned ${response.status}`,
+	if (response.status !== 302 || location === null) {
+		throw new Error(
+			`GitHub API artifact ${artifactId} download returned ${response.status}`,
 		);
 	}
 
-	let target: URL;
-
-	try {
-		target = new URL(location);
-	} catch {
-		throw new UpstreamError(
-			'upstream',
-			'GitHub returned an unparseable download URL',
+	if (new URL(location).protocol !== 'https:') {
+		throw new Error(
+			`GitHub API artifact ${artifactId} redirected to non-https`,
 		);
 	}
 
-	if (target.protocol !== 'https:') {
-		throw new UpstreamError(
-			'upstream',
-			'GitHub returned a non-https download URL',
-		);
-	}
-
-	if (
-		!KNOWN_DOWNLOAD_HOSTS.some((suffix) => target.hostname.endsWith(suffix))
-	) {
-		console.error(`Unexpected artifact download host: ${target.hostname}`);
-	}
-
-	return target.toString();
+	return location;
 }

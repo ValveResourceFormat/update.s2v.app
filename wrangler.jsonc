@@ -12,7 +12,7 @@
 	"workers_dev": false,
 	"preview_urls": false,
 	// Responses with a Cache-Control max-age are served from the edge without running the worker.
-	// Hits are still billed as requests, but cost no CPU time and no GitHub calls.
+	// Hits are still billed as requests, but cost no CPU time and no bucket reads.
 	"cache": {
 		"enabled": true
 	},
@@ -27,8 +27,16 @@
 		"PUBLIC_ORIGIN": "https://update.s2v.app",
 		"GITHUB_REPO_ID": "42366054", // ValveResourceFormat/ValveResourceFormat
 		"GITHUB_WORKFLOW": "build.yml",
+		"GITHUB_RELEASE_WORKFLOW": "website.yml",
 		"GITHUB_BRANCH": "master"
 	},
+	// The manifest channels and dev build files, written by the publish routes.
+	"r2_buckets": [
+		{
+			"binding": "BUILDS",
+			"bucket_name": "s2v-builds"
+		}
+	],
 	// Set with: npx wrangler secret put GITHUB_TOKEN
 	"secrets": {
 		"required": ["GITHUB_TOKEN"]

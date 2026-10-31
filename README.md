@@ -1,26 +1,35 @@
 # update.s2v.app
 
-Cloudflare Worker that backs the Source 2 Viewer update checker and the dev build download link on the website.
+Cloudflare Worker that backs the Source 2 Viewer update checker and the dev build page on the website.
 
-GitHub Actions artifacts cannot be downloaded without being logged in, so the worker holds a read-only token
-and redirects to the short-lived signed URL that GitHub hands out. It also combines the latest stable release
-and the latest dev build into a single manifest, so the GUI makes one request.
+Dev builds are served from an R2 bucket, since downloading GitHub Actions artifacts is slow and needs a login.
+When a push to master has built, the `publish-dev` job of the CI workflow calls `/v1/publish` with its OIDC token.
+The worker verifies that the token belongs to a push build of master, copies that run's viewer artifact into the
+bucket, and makes it the published dev build. It also combines the latest stable release and the published dev
+build into a single manifest, so the GUI makes one request. The `update-manifest` job of the website workflow
+calls `/v1/publish-stable` whenever a release is published, edited or deleted, and the worker stores the latest
+release in the bucket, so serving the manifest does not depend on the GitHub API.
 
 ## Endpoints
 
 | Path | Description |
 | --- | --- |
-| `GET /v1/latest.json` | Latest stable release and latest successful dev build, with per-platform assets |
-| `GET /v1/dev/{fileName}` | Redirects to the signed download URL of that file from the latest dev build |
-| `GET /v1/dev/{fileName}?sha256={hash}` | Same, but for the recent dev build with that hash, which is what the manifest links to |
+| `GET /v1/latest.json` | Latest stable release and published dev build, with per-platform assets |
+| `GET /v1/dev/{name}-{build}.{ext}` | That file of a kept dev build, which is what the manifest links to |
+| `POST /v1/publish` | Publishes the artifacts in the `{"artifactIds": [...]}` body from the run that the GitHub Actions OIDC token in the `Authorization` header belongs to. The token must be from a job in the `update-s2v-app` environment |
+| `POST /v1/publish-stable` | Stores the latest release, when the OIDC token is from the release workflow |
 
-Only assets listed in `GUI_ASSETS` in `src/manifest.ts` are included in the manifest. Adding a platform
+The published build and the one it replaced are kept, so a client holding the previous manifest can still download.
+
+Only assets listed in `GUI_ASSETS` in `src/builds.ts` are included in the manifest. Adding a platform
 means adding its file name and runtime identifier there, and uploading it from CI under that name with
 `archive: false`.
 
 Manifest fields are only ever added, never removed or renamed; a breaking change gets a new path prefix.
 
 ## Setup
+
+Create an R2 bucket named `s2v-builds`, then:
 
 ```sh
 npm install
@@ -30,13 +39,17 @@ npm run deploy
 
 The token is a fine-grained personal access token with read-only access to Actions on the repository.
 
+The manifest answers 503 until a release has been stored. Run the Website workflow by hand after the first deploy
+to store it.
+
 ## Local development
 
 ```sh
 npm run dev
 ```
 
-Serves on `http://localhost:8787`. Put `GITHUB_TOKEN=...` in a `.dev.vars` file to test redirects locally.
+Serves on `http://localhost:8787` with a local bucket. Put `GITHUB_TOKEN=...` in a `.dev.vars` file to test
+against GitHub locally.
 
 `npm test` type-checks and lints. `worker-configuration.d.ts` holds the Workers runtime types and the `Env`
 interface, generated from `wrangler.jsonc`. Run `npm run types` after changing the config or upgrading wrangler.

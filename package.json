@@ -12,5 +12,8 @@
 		"@biomejs/biome": "^2.4",
 		"typescript": "^7.0.2",
 		"wrangler": "^4.129"
+	},
+	"dependencies": {
+		"jose": "^6.2.14"
 	}
 }
