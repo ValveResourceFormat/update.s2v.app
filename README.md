@@ -12,12 +12,12 @@ release in the bucket, so serving the manifest does not depend on the GitHub API
 
 ## Endpoints
 
-| Path                               | Description                                                             |
-| ---------------------------------- | ----------------------------------------------------------------------- |
-| `GET /v1/latest.json`              | Latest stable release and published dev build, with per-platform assets |
-| `GET /v1/dev/{name}-{build}.{ext}` | That file of a kept dev build, which is what the manifest links to      |
-| `POST /v1/publish`                 | Publishes a build, called by the CI workflow                            |
-| `POST /v1/publish-stable`          | Stores the latest release, called by the release workflow               |
+| Path                                        | Description                                                             |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| `GET /v1/latest.json`                       | Latest stable release and published dev build, with per-platform assets |
+| `GET /v1/dev/{sha256}/{name}-{build}.{ext}` | That file of a kept dev build, which is what the manifest links to      |
+| `POST /v1/publish`                          | Publishes a build, called by the CI workflow                            |
+| `POST /v1/publish-stable`                   | Stores the latest release, called by the release workflow               |
 
 Both publish routes take the job's GitHub Actions OIDC token in the `Authorization` header. `/v1/publish` takes the
 artifacts to publish as `{"artifactIds": [...]}`, from the run the token belongs to.

@@ -4,9 +4,11 @@ import {
 	DEV_FILE_CACHE_CONTROL,
 	DEV_FILES_PREFIX,
 	DEV_KEY,
+	DEV_PATH,
 	type DevChannel,
 	type DevRecord,
 	devFileKeys,
+	devFilePath,
 	GUI_ASSETS,
 	type ManifestAsset,
 	numberedFileName,
@@ -54,10 +56,11 @@ async function copyArtifact(
 	}
 
 	const fileName = numberedFileName(artifact.name, buildNumber);
+	const path = devFilePath(sha256, artifact.name, buildNumber);
 
 	// R2 checks the hash, so a truncated or altered download fails instead of being published.
 	const object = await env.BUILDS.put(
-		`${DEV_FILES_PREFIX}${fileName}`,
+		`${DEV_FILES_PREFIX}${path}`,
 		response.body,
 		{
 			sha256,
@@ -75,7 +78,7 @@ async function copyArtifact(
 
 	return {
 		name: artifact.name,
-		url: `${env.PUBLIC_ORIGIN}/v1/dev/${fileName}`,
+		url: `${env.PUBLIC_ORIGIN}${DEV_PATH}${path}`,
 		size: object.size,
 		sha256,
 	};

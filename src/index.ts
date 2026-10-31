@@ -1,6 +1,7 @@
 import {
 	DEV_FILES_PREFIX,
 	DEV_KEY,
+	DEV_PATH,
 	type DevRecord,
 	readJson,
 	STABLE_KEY,
@@ -16,8 +17,7 @@ const MANIFEST_PATH = '/v1/latest.json';
 const MANIFEST_EDGE_CACHE_CONTROL =
 	'max-age=86400, stale-while-revalidate=60, stale-if-error=604800';
 const MANIFEST_CACHE_CONTROL = 'public, no-cache';
-const DEV_PATH = '/v1/dev/';
-const FILE_NAME_PATTERN = /^[\w.-]{1,128}$/;
+const DEV_FILE_PATTERN = /^[0-9a-f]{64}\/[\w.-]{1,128}$/;
 
 const HOME_URL = 'https://s2v.app/';
 
@@ -42,7 +42,7 @@ function jsonError(
 	);
 }
 
-// Not cached, since the next build's file name is known before it is published.
+// Not cached, since a file's path can be worked out from its build artifact before it is published.
 function devFileNotFound(): Response {
 	return jsonError(404, 'No such dev build file');
 }
@@ -88,13 +88,13 @@ async function handleDevFile(
 	env: Env,
 	url: URL,
 ): Promise<Response> {
-	const fileName = url.pathname.slice(DEV_PATH.length);
+	const path = url.pathname.slice(DEV_PATH.length);
 
-	if (!FILE_NAME_PATTERN.test(fileName)) {
+	if (!DEV_FILE_PATTERN.test(path)) {
 		return devFileNotFound();
 	}
 
-	const key = `${DEV_FILES_PREFIX}${fileName}`;
+	const key = `${DEV_FILES_PREFIX}${path}`;
 
 	if (request.method === 'HEAD') {
 		const object = await env.BUILDS.head(key);
