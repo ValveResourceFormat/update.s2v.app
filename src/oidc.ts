@@ -1,5 +1,5 @@
-// Verifies the OIDC token a GitHub Actions job sends. Only the publish job of a build of the trusted
-// branch can publish a dev build, and only the run that token was issued to.
+// Verifies the OIDC token a GitHub Actions job sends. Only a build of the trusted branch can publish
+// a dev build, and only the run that token was issued to.
 
 import { createRemoteJWKSet, errors, type JWTPayload, jwtVerify } from 'jose';
 import { errorMessage } from './errors.ts';
@@ -13,13 +13,8 @@ const SIGNING_KEYS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks`));
 // request from a fork can also have a head branch called master.
 const BUILD_EVENT = 'push';
 
-// Only a job that names this environment gets it in its token. The token does not say which job of
-// the run it was issued to, and every job that attests the build can request one.
-const PUBLISH_ENVIRONMENT = 'update-s2v-app';
-
 interface ActionsClaims extends JWTPayload {
 	repository?: string;
-	environment?: string;
 	repository_id?: string;
 	ref?: string;
 	event_name?: string;
@@ -108,10 +103,6 @@ export async function verifyRunToken(
 	}
 
 	if (!isFromWorkflow(claims, env.GITHUB_WORKFLOW, branchRef)) {
-		return null;
-	}
-
-	if (claims.environment !== PUBLISH_ENVIRONMENT) {
 		return null;
 	}
 

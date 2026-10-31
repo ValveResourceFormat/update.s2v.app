@@ -20,8 +20,7 @@ release in the bucket, so serving the manifest does not depend on the GitHub API
 | `POST /v1/publish-stable`          | Stores the latest release, called by the release workflow               |
 
 Both publish routes take the job's GitHub Actions OIDC token in the `Authorization` header. `/v1/publish` takes the
-artifacts to publish as `{"artifactIds": [...]}`, from the run the token belongs to, and only accepts tokens of jobs
-in the `update-s2v-app` environment.
+artifacts to publish as `{"artifactIds": [...]}`, from the run the token belongs to.
 
 The published build and the one it replaced are kept, so a client holding the previous manifest can still download.
 
