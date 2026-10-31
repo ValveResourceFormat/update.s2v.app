@@ -24,6 +24,8 @@ artifacts to publish as `{"artifactIds": [...]}`, from the run the token belongs
 
 The published build and the one it replaced are kept, so a client holding the previous manifest can still download.
 
+The edge caches the manifest for a day, and both publish routes purge it, so a publish shows up right away.
+
 Only assets listed in `GUI_ASSETS` in `src/builds.ts` are included in the manifest. Adding a platform
 means adding its file name and runtime identifier there, and uploading it from CI under that name with
 `archive: false`.

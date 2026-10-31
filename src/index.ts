@@ -10,9 +10,12 @@ import { errorMessage } from './errors.ts';
 import { verifyReleaseToken, verifyRunToken } from './oidc.ts';
 import { publishDevBuild, publishStableRelease } from './publish.ts';
 
-// Edge cache lifetimes. s-maxage must not be used here, since it disables both stale behaviours.
-const MANIFEST_TTL = 120;
-const MANIFEST_CACHE_CONTROL = `public, max-age=${MANIFEST_TTL}, stale-while-revalidate=30, stale-if-error=86400`;
+// The edge keeps the manifest until a publish purges it, while clients always ask the edge again.
+// s-maxage must not be used here, since it disables both stale behaviours.
+const MANIFEST_PATH = '/v1/latest.json';
+const MANIFEST_EDGE_CACHE_CONTROL =
+	'max-age=86400, stale-while-revalidate=60, stale-if-error=604800';
+const MANIFEST_CACHE_CONTROL = 'public, no-cache';
 const DEV_PATH = '/v1/dev/';
 const FILE_NAME_PATTERN = /^[\w.-]{1,128}$/;
 
@@ -61,6 +64,7 @@ async function handleManifest(env: Env): Promise<Response> {
 		headers: {
 			'Content-Type': 'application/json; charset=utf-8',
 			'Cache-Control': MANIFEST_CACHE_CONTROL,
+			'Cloudflare-CDN-Cache-Control': MANIFEST_EDGE_CACHE_CONTROL,
 			'X-Content-Type-Options': 'nosniff',
 			...CORS_HEADERS,
 		},
@@ -117,8 +121,24 @@ function bearerToken(request: Request): string {
 	return authorization.replace(/^Bearer /, '');
 }
 
+async function purgeManifest(ctx: ExecutionContext): Promise<void> {
+	if (ctx.cache === undefined) {
+		throw new Error('the Workers cache is not available');
+	}
+
+	const result = await ctx.cache.purge({ pathPrefixes: [MANIFEST_PATH] });
+
+	if (!result.success) {
+		const reasons = result.errors.map((error) => error.message).join('; ');
+
+		throw new Error(reasons);
+	}
+}
+
 // Only CI calls the publish routes, so it gets the reason for a failure rather than a generic error.
+// The manifest is purged even when nothing changed, so re-running a publish whose purge failed fixes it.
 async function publishResponse(
+	ctx: ExecutionContext,
 	what: string,
 	publishing: Promise<string>,
 ): Promise<Response> {
@@ -131,6 +151,15 @@ async function publishResponse(
 		console.error(`Publishing ${what} failed: ${reason}`);
 
 		return jsonError(502, reason);
+	}
+
+	try {
+		await purgeManifest(ctx);
+	} catch (error) {
+		const failure = `${message}, but purging the cached manifest failed: ${errorMessage(error)}`;
+		console.error(failure);
+
+		return jsonError(502, failure);
 	}
 
 	return Response.json(
@@ -166,7 +195,11 @@ async function readArtifactIds(request: Request): Promise<number[] | null> {
 
 // Called by the publish-dev job of the CI workflow once a build has finished, with the ids of the
 // artifacts the viewer job uploaded.
-async function handlePublish(request: Request, env: Env): Promise<Response> {
+async function handlePublish(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+): Promise<Response> {
 	const run = await verifyRunToken(env, bearerToken(request));
 
 	if (run === null) {
@@ -180,6 +213,7 @@ async function handlePublish(request: Request, env: Env): Promise<Response> {
 	}
 
 	return publishResponse(
+		ctx,
 		`build ${run.runNumber}`,
 		publishDevBuild(env, run, artifactIds),
 	);
@@ -189,6 +223,7 @@ async function handlePublish(request: Request, env: Env): Promise<Response> {
 async function handlePublishStable(
 	request: Request,
 	env: Env,
+	ctx: ExecutionContext,
 ): Promise<Response> {
 	const trusted = await verifyReleaseToken(env, bearerToken(request));
 
@@ -196,20 +231,24 @@ async function handlePublishStable(
 		return jsonError(403, 'Token is not from the release workflow');
 	}
 
-	return publishResponse('the latest release', publishStableRelease(env));
+	return publishResponse(ctx, 'the latest release', publishStableRelease(env));
 }
 
-async function handleRequest(request: Request, env: Env): Promise<Response> {
+async function handleRequest(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+): Promise<Response> {
 	const url = new URL(request.url);
 	const path = url.pathname;
 
 	if (request.method === 'POST') {
 		if (path === '/v1/publish') {
-			return handlePublish(request, env);
+			return handlePublish(request, env, ctx);
 		}
 
 		if (path === '/v1/publish-stable') {
-			return handlePublishStable(request, env);
+			return handlePublishStable(request, env, ctx);
 		}
 	}
 
@@ -226,7 +265,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 		return Response.redirect(`${url.origin}${path}`, 301);
 	}
 
-	if (path === '/v1/latest.json') {
+	if (path === MANIFEST_PATH) {
 		return handleManifest(env);
 	}
 
@@ -238,9 +277,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		try {
-			return await handleRequest(request, env);
+			return await handleRequest(request, env, ctx);
 		} catch (error) {
 			console.error(errorMessage(error));
 
