@@ -22,7 +22,7 @@ export interface ManifestAsset {
 	name: string;
 	url: string;
 	size: number;
-	sha256: string | null;
+	sha256: string;
 }
 
 export interface StableChannel {
@@ -68,13 +68,11 @@ export function devFilePath(
 	return `${sha256}/${numberedFileName(name, buildNumber)}`;
 }
 
-// Read from the URLs, which name the files exactly as they were stored.
 export function devFileKeys(build: DevChannel): string[] {
-	return Object.values(build.assets).map((asset) => {
-		const path = new URL(asset.url).pathname.slice(DEV_PATH.length);
-
-		return `${DEV_FILES_PREFIX}${path}`;
-	});
+	return Object.values(build.assets).map(
+		(asset) =>
+			`${DEV_FILES_PREFIX}${devFilePath(asset.sha256, asset.name, build.buildNumber)}`,
+	);
 }
 
 export async function readJson<T>(env: Env, key: string): Promise<T | null> {
